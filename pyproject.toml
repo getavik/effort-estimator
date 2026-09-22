@@ -1,0 +1,15 @@
+[project]
+name = "effort-estimator"
+version = "0.1.0"
+description = "Parametric project effort estimation agent — COCOMO II + ISBSG, local LLM calibration, Excel/PDF export, browser GUI"
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.7",
+    "rich>=13.7",
+    "openpyxl>=3.1",
+    "reportlab>=4.2",
+    "langchain-ollama>=0.2",
+    "ddgs>=9.0",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+]

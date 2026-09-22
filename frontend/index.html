@@ -1,0 +1,723 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Effort Estimation Agent</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📊</text></svg>" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+
+<!-- Zero build step: React, ReactDOM and Babel's in-browser JSX transform,
+     loaded as plain <script> tags. Nothing here needs npm install or a
+     bundler -- open this file, or serve it with any static file server. -->
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+
+<style>
+  body { font-family: 'Inter', system-ui, sans-serif; background: #F4F6F9; }
+  ::-webkit-scrollbar { height: 8px; width: 8px; }
+  ::-webkit-scrollbar-thumb { background: #C7D0DB; border-radius: 4px; }
+  .track-grid { background-image: repeating-linear-gradient(to right, #EEF2F6 0, #EEF2F6 1px, transparent 1px, transparent calc(100% / var(--cols))); }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .spinner { animation: spin 0.8s linear infinite; }
+</style>
+</head>
+<body class="text-slate-800">
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react,env">
+const { useState, useEffect, useCallback, useMemo, useRef } = React;
+
+const API_BASE = "http://127.0.0.1:8420";
+const NAVY = "#1F3A5F", TEAL = "#2E7D8F", AMBER = "#E8A33D", RED = "#C0392B", GREEN = "#2E7D5C";
+
+// --------------------------------------------------------------------------
+// Small primitives
+// --------------------------------------------------------------------------
+
+function Card({ title, subtitle, children, className = "" }) {
+  return (
+    <div className={"bg-white rounded-2xl border border-slate-200 shadow-sm p-5 " + className}>
+      {title && (
+        <div className="mb-4">
+          <h3 className="text-sm font-semibold text-slate-800 tracking-wide">{title}</h3>
+          {subtitle && <p className="text-xs text-slate-400 mt-0.5">{subtitle}</p>}
+        </div>
+      )}
+      {children}
+    </div>
+  );
+}
+
+function Field({ label, hint, children }) {
+  return (
+    <label className="block mb-3">
+      <span className="block text-xs font-medium text-slate-600 mb-1">{label}</span>
+      {children}
+      {hint && <span className="block text-[11px] text-slate-400 mt-0.5">{hint}</span>}
+    </label>
+  );
+}
+
+const inputCls = "w-full rounded-lg border border-slate-300 px-3 py-1.5 text-sm " +
+                  "focus:outline-none focus:ring-2 focus:ring-teal-500/40 focus:border-teal-500 bg-white";
+
+function TextInput(props) { return <input {...props} className={inputCls} />; }
+
+function Select({ value, onChange, options, ...rest }) {
+  return (
+    <select value={value} onChange={onChange} className={inputCls} {...rest}>
+      {options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+    </select>
+  );
+}
+
+function NumberInput(props) {
+  return <input type="number" {...props} className={inputCls}
+                onWheel={e => e.target.blur()} />;
+}
+
+function Toggle({ checked, onChange, label, disabled }) {
+  return (
+    <label className={"flex items-center gap-2 text-sm select-none " + (disabled ? "opacity-40" : "cursor-pointer")}>
+      <span className={"relative inline-block w-9 h-5 rounded-full transition-colors " +
+                        (checked ? "bg-teal-600" : "bg-slate-300")}>
+        <input type="checkbox" checked={checked} disabled={disabled}
+               onChange={e => onChange(e.target.checked)} className="sr-only" />
+        <span className={"absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform " +
+                          (checked ? "translate-x-4" : "")} />
+      </span>
+      {label}
+    </label>
+  );
+}
+
+function StatusPill({ ok, label, pending }) {
+  const color = pending ? "bg-slate-400" : ok ? "bg-emerald-400" : "bg-rose-400";
+  return (
+    <div className="flex items-center gap-1.5 text-xs text-white/90">
+      <span className={"w-2 h-2 rounded-full " + color + (pending ? "" : " ")} />
+      {label}
+    </div>
+  );
+}
+
+const RATING_ORDER = ["very_low", "low", "nominal", "high", "very_high"];
+const RATING_LABEL = { very_low: "Very low", low: "Low", nominal: "Nominal", high: "High", very_high: "Very high" };
+
+function RatingSlider({ label, value, onChange }) {
+  const idx = RATING_ORDER.indexOf(value);
+  return (
+    <div className="mb-4">
+      <div className="flex justify-between text-xs mb-1">
+        <span className="font-medium text-slate-600">{label}</span>
+        <span className="text-teal-700 font-semibold">{RATING_LABEL[value]}</span>
+      </div>
+      <input type="range" min="0" max="4" step="1" value={idx}
+             onChange={e => onChange(RATING_ORDER[Number(e.target.value)])}
+             className="w-full accent-teal-600" />
+    </div>
+  );
+}
+
+// --------------------------------------------------------------------------
+// Intake form
+// --------------------------------------------------------------------------
+
+const DEFAULT_SCOPE = {
+  functional_modules: 6, integrations: 3, migration_entities: 0,
+  reports_dashboards: 5, user_roles: 3, applications_in_scope: 3,
+  monthly_ticket_volume: 250, avg_handling_time_hours: 2.0,
+  coverage_model: "8x5", requested_ftes: 4,
+};
+
+const DEFAULT_DRIVERS = Object.fromEntries(
+  ["precedentedness", "architecture_risk", "team_cohesion", "process_maturity",
+   "requirements_volatility", "team_experience", "reliability_required", "team_distribution"]
+  .map(k => [k, "nominal"])
+);
+
+const DRIVER_LABELS = {
+  precedentedness: "Have we delivered this kind of work before?",
+  architecture_risk: "Is the architecture settled and de-risked?",
+  team_cohesion: "How well do client and delivery teams work together?",
+  process_maturity: "Process maturity of the delivery organisation",
+  requirements_volatility: "Expected requirements churn",
+  team_experience: "Team experience with this stack",
+  reliability_required: "Reliability / compliance demands",
+  team_distribution: "Team co-location (Very high = fully co-located)",
+};
+
+function IntakeForm({ meta, health, onSubmit, loading }) {
+  const [projectName, setProjectName] = useState("");
+  const [client, setClient] = useState("");
+  const [engagementType, setEngagementType] = useState("greenfield");
+  const [purpose, setPurpose] = useState("new_product");
+  const [techProfile, setTechProfile] = useState("traditional");
+  const [tools, setTools] = useState("");
+  const [deliveryModel, setDeliveryModel] = useState("agile");
+  const [durationValue, setDurationValue] = useState(9);
+  const [durationUnit, setDurationUnit] = useState("months");
+  const [startDate, setStartDate] = useState(new Date().toISOString().slice(0, 10));
+  const [scope, setScope] = useState(DEFAULT_SCOPE);
+  const [tuneDrivers, setTuneDrivers] = useState(false);
+  const [drivers, setDrivers] = useState(DEFAULT_DRIVERS);
+  const [rate, setRate] = useState(0);
+  const [currency, setCurrency] = useState("USD");
+  const [notes, setNotes] = useState("");
+  const [useWeb, setUseWeb] = useState(true);
+  const [useLlm, setUseLlm] = useState(true);
+  const [model, setModel] = useState("qwen3:8b");
+
+  const ollamaUp = health && health.ollama;
+  useEffect(() => {
+    if (health && health.models && health.models.length && !health.models.includes(model)) {
+      setModel(health.models[0]);
+    }
+  }, [health]);
+
+  const showSize = ["greenfield", "enhancement", "ptk"].includes(engagementType);
+  const showPtk = engagementType === "ptk";
+  const showSupport = engagementType === "support";
+  const showStaffAug = engagementType === "staff_aug";
+
+  const setScopeField = (k, v) => setScope(s => ({ ...s, [k]: v }));
+  const setDriverField = (k, v) => setDrivers(d => ({ ...d, [k]: v }));
+
+  const submit = (e) => {
+    e.preventDefault();
+    const months = durationUnit === "years" ? Number(durationValue) * 12 : Number(durationValue);
+    const brief = {
+      project_name: projectName || "Untitled Engagement",
+      client: client || "Internal",
+      engagement_type: engagementType,
+      purpose,
+      tech_profile: techProfile,
+      proposed_tools: tools.split(",").map(t => t.trim()).filter(Boolean),
+      delivery_model: deliveryModel,
+      target_duration_months: months,
+      start_date: startDate,
+      scope: {
+        ...scope,
+        functional_modules: Number(scope.functional_modules),
+        integrations: Number(scope.integrations),
+        migration_entities: Number(scope.migration_entities),
+        reports_dashboards: Number(scope.reports_dashboards),
+        user_roles: Number(scope.user_roles),
+        applications_in_scope: Number(scope.applications_in_scope),
+        monthly_ticket_volume: Number(scope.monthly_ticket_volume),
+        avg_handling_time_hours: Number(scope.avg_handling_time_hours),
+        requested_ftes: Number(scope.requested_ftes),
+      },
+      drivers: tuneDrivers ? drivers : DEFAULT_DRIVERS,
+      blended_rate_per_hour: Number(rate) || 0,
+      currency,
+      notes,
+    };
+    onSubmit(brief, { use_web: useWeb && ollamaUp, use_llm: useLlm && ollamaUp, model });
+  };
+
+  return (
+    <form onSubmit={submit} className="space-y-4">
+      <Card title="Project" subtitle="Who is this for, and what kind of engagement is it">
+        <Field label="Project name">
+          <TextInput value={projectName} onChange={e => setProjectName(e.target.value)}
+                     placeholder="e.g. Orion Core Modernization" />
+        </Field>
+        <Field label="Client / business unit">
+          <TextInput value={client} onChange={e => setClient(e.target.value)} placeholder="Internal" />
+        </Field>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Engagement type">
+            <Select value={engagementType} onChange={e => setEngagementType(e.target.value)}
+                    options={meta.engagement_types} />
+          </Field>
+          <Field label="Purpose">
+            <Select value={purpose} onChange={e => setPurpose(e.target.value)} options={meta.purposes} />
+          </Field>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Technology profile">
+            <Select value={techProfile} onChange={e => setTechProfile(e.target.value)} options={meta.tech_profiles} />
+          </Field>
+          <Field label="Delivery model">
+            <Select value={deliveryModel} onChange={e => setDeliveryModel(e.target.value)} options={meta.delivery_models} />
+          </Field>
+        </div>
+        <Field label="Proposed tools / stack" hint="Comma separated — feeds the live benchmark research">
+          <TextInput value={tools} onChange={e => setTools(e.target.value)}
+                     placeholder="Salesforce, MuleSoft, Data Loader" />
+        </Field>
+      </Card>
+
+      <Card title="Timeline">
+        <div className="grid grid-cols-3 gap-3">
+          <div className="col-span-2">
+            <Field label="Expected duration">
+              <NumberInput min="0.5" step="0.5" value={durationValue}
+                           onChange={e => setDurationValue(e.target.value)} />
+            </Field>
+          </div>
+          <Field label="Unit">
+            <Select value={durationUnit} onChange={e => setDurationUnit(e.target.value)}
+                    options={[{ value: "months", label: "Months" }, { value: "years", label: "Years" }]} />
+          </Field>
+        </div>
+        <Field label="Planned start date">
+          <TextInput type="date" value={startDate} onChange={e => setStartDate(e.target.value)} />
+        </Field>
+      </Card>
+
+      {(showSize || showSupport || showStaffAug) && (
+        <Card title="Scope drivers" subtitle="Rough counts are fine — this is what makes the estimate real">
+          {showSize && (
+            <div className="grid grid-cols-2 gap-x-3">
+              <Field label="Functional modules">
+                <NumberInput min="0" value={scope.functional_modules} onChange={e => setScopeField("functional_modules", e.target.value)} />
+              </Field>
+              <Field label="Integrations / APIs">
+                <NumberInput min="0" value={scope.integrations} onChange={e => setScopeField("integrations", e.target.value)} />
+              </Field>
+              <Field label="Data entities to migrate">
+                <NumberInput min="0" value={scope.migration_entities} onChange={e => setScopeField("migration_entities", e.target.value)} />
+              </Field>
+              <Field label="Reports / dashboards">
+                <NumberInput min="0" value={scope.reports_dashboards} onChange={e => setScopeField("reports_dashboards", e.target.value)} />
+              </Field>
+              <Field label="Distinct user roles">
+                <NumberInput min="0" value={scope.user_roles} onChange={e => setScopeField("user_roles", e.target.value)} />
+              </Field>
+              {showPtk && (
+                <Field label="Applications taken over">
+                  <NumberInput min="0" value={scope.applications_in_scope} onChange={e => setScopeField("applications_in_scope", e.target.value)} />
+                </Field>
+              )}
+            </div>
+          )}
+          {showSupport && (
+            <div className="grid grid-cols-2 gap-x-3">
+              <Field label="Applications in scope">
+                <NumberInput min="0" value={scope.applications_in_scope} onChange={e => setScopeField("applications_in_scope", e.target.value)} />
+              </Field>
+              <Field label="Tickets per month">
+                <NumberInput min="0" value={scope.monthly_ticket_volume} onChange={e => setScopeField("monthly_ticket_volume", e.target.value)} />
+              </Field>
+              <Field label="Avg handling time (h)">
+                <NumberInput min="0" step="0.25" value={scope.avg_handling_time_hours} onChange={e => setScopeField("avg_handling_time_hours", e.target.value)} />
+              </Field>
+              <Field label="Coverage model">
+                <Select value={scope.coverage_model} onChange={e => setScopeField("coverage_model", e.target.value)}
+                        options={["8x5", "16x5", "24x5", "24x7"].map(v => ({ value: v, label: v }))} />
+              </Field>
+            </div>
+          )}
+          {showStaffAug && (
+            <Field label="FTEs requested">
+              <NumberInput min="0.5" step="0.5" value={scope.requested_ftes} onChange={e => setScopeField("requested_ftes", e.target.value)} />
+            </Field>
+          )}
+        </Card>
+      )}
+
+      <Card title="Cost drivers" subtitle="Defaults are all nominal — tune them for a real bid">
+        <Toggle checked={tuneDrivers} onChange={setTuneDrivers} label="Tune the 8 COCOMO II drivers" />
+        {tuneDrivers && (
+          <div className="mt-4">
+            {Object.keys(DEFAULT_DRIVERS).map(k => (
+              <RatingSlider key={k} label={DRIVER_LABELS[k]} value={drivers[k]} onChange={v => setDriverField(k, v)} />
+            ))}
+          </div>
+        )}
+      </Card>
+
+      <Card title="Cost & notes">
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Currency">
+            <TextInput value={currency} onChange={e => setCurrency(e.target.value)} />
+          </Field>
+          <Field label="Blended rate / hour" hint="0 to skip cost rollup">
+            <NumberInput min="0" step="1" value={rate} onChange={e => setRate(e.target.value)} />
+          </Field>
+        </div>
+        <Field label="Notes">
+          <textarea value={notes} onChange={e => setNotes(e.target.value)} rows="2" className={inputCls} />
+        </Field>
+      </Card>
+
+      <Card title="Research & commentary">
+        {!ollamaUp && (
+          <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3">
+            Ollama not detected on localhost:11434. Estimate will use published benchmarks only —
+            no live calibration or written commentary. Start Ollama and refresh to enable them.
+          </p>
+        )}
+        <div className="space-y-2 mb-3">
+          <Toggle checked={useWeb} disabled={!ollamaUp} onChange={setUseWeb}
+                  label="Calibrate delivery rate from live web research" />
+          <Toggle checked={useLlm} disabled={!ollamaUp} onChange={setUseLlm}
+                  label="Generate written commentary" />
+        </div>
+        {ollamaUp && (
+          <Field label="Model">
+            {health.models.length ? (
+              <Select value={model} onChange={e => setModel(e.target.value)}
+                      options={health.models.map(m => ({ value: m, label: m }))} />
+            ) : (
+              <TextInput value={model} onChange={e => setModel(e.target.value)} />
+            )}
+          </Field>
+        )}
+      </Card>
+
+      <button type="submit" disabled={loading}
+              className="w-full py-3 rounded-xl font-semibold text-white transition-colors
+                         bg-[--navy] hover:opacity-90 disabled:opacity-60 flex items-center justify-center gap-2"
+              style={{ backgroundColor: NAVY }}>
+        {loading && <span className="spinner inline-block w-4 h-4 border-2 border-white/40 border-t-white rounded-full" />}
+        {loading ? "Generating…" : "Generate Estimate"}
+      </button>
+    </form>
+  );
+}
+
+// --------------------------------------------------------------------------
+// Results
+// --------------------------------------------------------------------------
+
+function fmt(n, d = 0) { return Number(n).toLocaleString(undefined, { maximumFractionDigits: d, minimumFractionDigits: d }); }
+
+function Kpi({ label, value, sub }) {
+  return (
+    <div className="bg-white rounded-xl border border-slate-200 shadow-sm px-4 py-3 flex-1 min-w-[140px]">
+      <div className="text-[11px] uppercase tracking-wide text-slate-400 font-medium">{label}</div>
+      <div className="text-xl font-bold mt-0.5" style={{ color: NAVY }}>{value}</div>
+      {sub && <div className="text-[11px] text-slate-400 mt-0.5">{sub}</div>}
+    </div>
+  );
+}
+
+function ScheduleBanner({ schedule }) {
+  const feasible = schedule.feasible;
+  const ratio = schedule.compression_ratio;
+  const tone = !feasible ? "red" : ratio < 0.9 ? "amber" : ratio > 1.4 ? "sky" : "green";
+  const styles = {
+    red: "bg-rose-50 border-rose-300 text-rose-900",
+    amber: "bg-amber-50 border-amber-300 text-amber-900",
+    sky: "bg-sky-50 border-sky-300 text-sky-900",
+    green: "bg-emerald-50 border-emerald-300 text-emerald-900",
+  };
+  return (
+    <div className={"rounded-xl border-l-4 px-4 py-3 text-sm leading-relaxed " + styles[tone]}>
+      <span className="font-semibold uppercase text-xs tracking-wide mr-2">Schedule</span>
+      {schedule.verdict}
+    </div>
+  );
+}
+
+function PhaseGantt({ phases, months }) {
+  const n = months || Math.max(1, Math.ceil(Math.max(...phases.map(p => p.end_month))));
+  return (
+    <div className="overflow-x-auto">
+      <div style={{ minWidth: Math.max(560, n * 46) }}>
+        <div className="flex text-[10px] text-slate-400 mb-1 pl-40">
+          {Array.from({ length: n }).map((_, i) => (
+            <div key={i} className="flex-1 text-center">M{i + 1}</div>
+          ))}
+        </div>
+        {phases.map((p, i) => {
+          const left = (p.start_month / n) * 100;
+          const width = Math.max(((p.end_month - p.start_month) / n) * 100, 1.5);
+          return (
+            <div key={i} className="flex items-center mb-1.5">
+              <div className="w-40 shrink-0 text-xs text-slate-600 pr-2 truncate" title={p.name}>{p.name}</div>
+              <div className="relative flex-1 h-6 rounded" style={{ "--cols": n }}>
+                <div className="track-grid absolute inset-0 rounded" />
+                <div className="absolute h-6 rounded-md flex items-center px-2 text-[10px] text-white font-medium whitespace-nowrap overflow-hidden"
+                     style={{ left: left + "%", width: width + "%", backgroundColor: TEAL }}>
+                  {(p.end_month - p.start_month).toFixed(1)}mo
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function ResourceHeatmap({ resources }) {
+  const n = resources.months;
+  const peak = resources.peak_team_size || 1;
+  return (
+    <div className="overflow-x-auto">
+      <table className="text-xs border-collapse" style={{ minWidth: Math.max(560, n * 42) }}>
+        <thead>
+          <tr>
+            <th className="text-left text-slate-500 font-medium pr-3 pb-1 sticky left-0 bg-white">Role</th>
+            {Array.from({ length: n }).map((_, i) => (
+              <th key={i} className="text-slate-400 font-normal px-1 pb-1">M{i + 1}</th>
+            ))}
+            <th className="text-slate-500 font-medium pl-2 pb-1">PM</th>
+          </tr>
+        </thead>
+        <tbody>
+          {resources.roles.map((r, ri) => (
+            <tr key={ri} className="border-t border-slate-100">
+              <td className="py-1 pr-3 font-medium text-slate-700 whitespace-nowrap sticky left-0 bg-white">{r.role}</td>
+              {r.monthly_ftes.map((f, mi) => {
+                const intensity = Math.min(f / peak, 1);
+                return (
+                  <td key={mi} className="text-center py-1 px-1">
+                    {f > 0.04 ? (
+                      <div className="rounded mx-auto flex items-center justify-center text-[10px]"
+                           style={{
+                             width: 30, height: 20,
+                             backgroundColor: `rgba(46,125,143,${0.15 + intensity * 0.65})`,
+                             color: intensity > 0.55 ? "white" : "#1F3A5F",
+                           }}>
+                        {f.toFixed(1)}
+                      </div>
+                    ) : <span className="text-slate-300">·</span>}
+                  </td>
+                );
+              })}
+              <td className="text-center font-semibold text-slate-700 pl-2">{r.total_person_months.toFixed(1)}</td>
+            </tr>
+          ))}
+          <tr className="border-t-2 border-slate-300 font-semibold">
+            <td className="py-1 pr-3 sticky left-0 bg-white">TOTAL FTE</td>
+            {resources.monthly_total_ftes.map((t, i) => (
+              <td key={i} className="text-center py-1 px-1">{t > 0.04 ? t.toFixed(1) : "·"}</td>
+            ))}
+            <td></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function MilestoneList({ milestones }) {
+  return (
+    <ol className="relative border-l-2 border-slate-200 pl-4 space-y-3">
+      {milestones.map((m, i) => (
+        <li key={i} className="relative">
+          <span className="absolute -left-[21px] top-1 w-2.5 h-2.5 rounded-full" style={{ backgroundColor: AMBER }} />
+          <div className="text-sm font-semibold text-slate-800">{m.name}</div>
+          <div className="text-xs text-slate-400">M{m.month_offset.toFixed(1)} · {m.calendar_date}</div>
+          {m.gate_criteria && <div className="text-xs text-slate-500 mt-0.5">{m.gate_criteria}</div>}
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+function RiskList({ risks }) {
+  return (
+    <ul className="space-y-1.5">
+      {risks.map((r, i) => {
+        const critical = r.startsWith("CRITICAL");
+        return (
+          <li key={i} className="flex gap-2 text-sm">
+            <span className="mt-1.5 w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: critical ? RED : AMBER }} />
+            <span className={critical ? "font-medium text-rose-900" : "text-slate-700"}>{r}</span>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+function ResultsPanel({ estimate, jobId }) {
+  if (!estimate) {
+    return (
+      <div className="h-full flex items-center justify-center text-center px-8">
+        <div>
+          <div className="text-4xl mb-3">📊</div>
+          <p className="text-slate-400 text-sm max-w-xs mx-auto">
+            Fill in the brief and generate an estimate — the effort, schedule,
+            phase plan, and resource loading will appear here.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  const { brief, size, effort, schedule, phases, resources, milestones, risks, assumptions, narrative, estimated_cost } = estimate;
+
+  return (
+    <div className="space-y-5">
+      <div>
+        <h2 className="text-lg font-bold" style={{ color: NAVY }}>{brief.project_name}</h2>
+        <p className="text-xs text-slate-400">
+          {brief.client} · {brief.engagement_type.replace("_", " ")} / {brief.purpose.replace(/_/g, " ")} · generated {estimate.generated_at}
+        </p>
+      </div>
+
+      <div className="flex flex-wrap gap-3">
+        <Kpi label="Adjusted size" value={fmt(size.adjusted_function_points) + " FP"} />
+        <Kpi label="Effort (likely)" value={fmt(effort.likely_hours) + " h"} sub={fmt(effort.likely_hours / 152, 1) + " PM"} />
+        <Kpi label="Effort range" value={fmt(effort.optimistic_hours) + "–" + fmt(effort.pessimistic_hours)} />
+        <Kpi label="Duration" value={fmt(schedule.recommended_months, 1) + " mo"} sub={"nominal " + fmt(schedule.nominal_months, 1)} />
+        <Kpi label="Peak team" value={fmt(resources.peak_team_size, 1) + " FTE"} sub={"avg " + fmt(resources.average_team_size, 1)} />
+        {estimated_cost > 0 && <Kpi label="Indicative cost" value={brief.currency + " " + fmt(estimated_cost)} />}
+      </div>
+
+      <ScheduleBanner schedule={schedule} />
+
+      {narrative && (
+        <Card title="Commentary">
+          <p className="text-sm text-slate-700 leading-relaxed whitespace-pre-line border-l-2 pl-3" style={{ borderColor: TEAL }}>
+            {narrative}
+          </p>
+        </Card>
+      )}
+
+      <Card title="Phase plan">
+        <PhaseGantt phases={phases} months={resources.months} />
+      </Card>
+
+      <Card title="Resource loading" subtitle="FTE by month, by role">
+        <ResourceHeatmap resources={resources} />
+      </Card>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+        <Card title="Milestones"><MilestoneList milestones={milestones} /></Card>
+        <Card title="Risks"><RiskList risks={risks} /></Card>
+      </div>
+
+      <Card title="Assumptions">
+        <details>
+          <summary className="text-sm text-teal-700 cursor-pointer select-none">Show {assumptions.length} assumptions</summary>
+          <ul className="mt-2 space-y-1 text-xs text-slate-500 list-disc pl-4">
+            {assumptions.map((a, i) => <li key={i}>{a}</li>)}
+          </ul>
+        </details>
+      </Card>
+
+      <div className="flex gap-3 pb-2">
+        <a href={`${API_BASE}/api/estimate/${jobId}/download/xlsx`}
+           className="flex-1 text-center py-2.5 rounded-xl font-semibold text-white text-sm"
+           style={{ backgroundColor: NAVY }}>
+          ⬇ Download Excel
+        </a>
+        <a href={`${API_BASE}/api/estimate/${jobId}/download/pdf`}
+           className="flex-1 text-center py-2.5 rounded-xl font-semibold text-sm border-2"
+           style={{ borderColor: NAVY, color: NAVY }}>
+          ⬇ Download PDF
+        </a>
+      </div>
+    </div>
+  );
+}
+
+// --------------------------------------------------------------------------
+// App
+// --------------------------------------------------------------------------
+
+function App() {
+  const [meta, setMeta] = useState(null);
+  const [health, setHealth] = useState(null);
+  const [healthPending, setHealthPending] = useState(true);
+  const [backendUp, setBackendUp] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [result, setResult] = useState(null);
+
+  const pollHealth = useCallback(async () => {
+    try {
+      const r = await fetch(`${API_BASE}/api/health`);
+      const d = await r.json();
+      setHealth(d);
+      setBackendUp(true);
+    } catch (e) {
+      setBackendUp(false);
+    } finally {
+      setHealthPending(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetch(`${API_BASE}/api/meta`).then(r => r.json()).then(setMeta).catch(() => setBackendUp(false));
+    pollHealth();
+    const id = setInterval(pollHealth, 8000);
+    return () => clearInterval(id);
+  }, [pollHealth]);
+
+  const handleSubmit = async (brief, options) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const r = await fetch(`${API_BASE}/api/estimate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ brief, options }),
+      });
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        throw new Error(d.detail || `Request failed (${r.status})`);
+      }
+      const d = await r.json();
+      setResult(d);
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen">
+      <header className="px-6 py-4" style={{ background: `linear-gradient(120deg, ${NAVY}, #14263F)` }}>
+        <div className="max-w-7xl mx-auto flex items-center justify-between flex-wrap gap-3">
+          <div>
+            <h1 className="text-white font-bold text-lg tracking-tight">📊 Effort Estimation Agent</h1>
+            <p className="text-white/50 text-xs">COCOMO II · ISBSG · local LLM calibration</p>
+          </div>
+          <div className="flex gap-4">
+            <StatusPill pending={backendUp === null} ok={backendUp} label="Backend" />
+            <StatusPill pending={healthPending} ok={health && health.ollama} label="Ollama" />
+            {health && health.ollama && (
+              <span className="text-xs text-white/50">{health.models.length} model{health.models.length === 1 ? "" : "s"}</span>
+            )}
+          </div>
+        </div>
+      </header>
+
+      {backendUp === false && (
+        <div className="bg-rose-50 border-b border-rose-200 text-rose-800 text-sm px-6 py-2 text-center">
+          Can't reach the API server at {API_BASE}. Start it with <code className="bg-rose-100 px-1 rounded">uv run server.py</code> and refresh.
+        </div>
+      )}
+      {error && (
+        <div className="bg-rose-50 border-b border-rose-200 text-rose-800 text-sm px-6 py-2 text-center">{error}</div>
+      )}
+
+      <main className="max-w-7xl mx-auto px-6 py-6 grid grid-cols-1 lg:grid-cols-[420px_1fr] gap-6 items-start">
+        <div>
+          {meta ? (
+            <IntakeForm meta={meta} health={health} onSubmit={handleSubmit} loading={loading} />
+          ) : (
+            <div className="text-slate-400 text-sm">Loading form…</div>
+          )}
+        </div>
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 min-h-[400px] lg:sticky lg:top-6">
+          <ResultsPanel estimate={result && result.estimate} jobId={result && result.id} />
+        </div>
+      </main>
+
+      <footer className="text-center text-xs text-slate-400 py-6">
+        Indicative estimate, not a fixed-price commitment. Runs entirely on this machine.
+      </footer>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>

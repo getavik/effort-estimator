@@ -1,0 +1,16 @@
+# Python / uv
+.venv/
+__pycache__/
+*.pyc
+.cache/
+
+# generated estimates (regenerable, and may contain client-identifying data)
+output/
+
+# editor / OS noise
+.DS_Store
+.vscode/
+.idea/
+
+# env secrets, if you ever add any
+.env
